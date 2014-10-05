@@ -30,6 +30,7 @@ SSLConn *SSLConn_new(SSLConnConfig *config, SSLConnError *err) {
   SSL *ssl;
   BIO *bio;
 
+  // Create new SSL context that understands SSLv2, SSLv3, TLSv1, TLSv1.1 and TLSv1.2 protocols (SSLv23_server_method)
   if (config->is_server) {
     ctx = SSL_CTX_new(SSLv23_server_method());
   } else {
@@ -40,7 +41,7 @@ SSLConn *SSLConn_new(SSLConnConfig *config, SSLConnError *err) {
     goto error;
   }
 
-  SSL_CTX_set_verify(ctx, config->verify_mode, NULL); 
+  SSL_CTX_set_verify(ctx, config->verify_mode, NULL); // TODO Set verify callback here
   SSL_CTX_set_options(ctx, config->options);
 
   if (config->is_server) {
@@ -144,6 +145,52 @@ int SSLConn_shutdown(SSLConn *conn, SSLConnError *err) {
   code = SSL_shutdown(conn->ssl);
   return handle_ret_code(conn, err, code);
 }
+
+/**
+ * Returns the cipher in use by this connection
+ */
+SSLCipher * SSLConn_get_cipher(SSLConn *conn) {
+  return SSL_get_cipher(conn->ssl);
+}
+
+/**
+ * Returns all ciphers available on this connection
+ * TODO Move into cipher.c
+ */
+SSLCipher * SSLConn_get_ciphers(SSLConn *conn) {
+  int i = 0;
+  SSLCipher * last = NULL;
+  STACK_OF(SSL_CIPHER) *sk = SSL_get_ciphers(conn->ssl);
+
+  for (i=0; i<sk_SSL_CIPHER_num(sk); i++) {
+    SSL_CIPHER *c = sk_SSL_CIPHER_value(sk, i);
+
+    char * buf = malloc(128);
+
+    SSLCipher * result = malloc(sizeof(SSLCipher));
+    result->name = SSL_CIPHER_get_name(c);
+    result->description = SSL_CIPHER_description(c, buf, 128);
+    result->bits = SSL_CIPHER_get_bits(c, &result->alg_bits);
+    result->prev = last;
+
+    last = result;
+  }
+
+  return last;
+}
+
+/**
+ * TODO Move into cipher.c
+ */
+void SSLConn_free_ciphers(SSLCipher *cipher) {
+    while(cipher != NULL) {
+        SSLCipher *prev = cipher->prev;
+        free(cipher->description);
+        free(cipher);
+        cipher = prev;
+    }
+}
+
 
 long goconn_bio_ctrl(BIO *bio, int cmd, long num, void *ptr) {
   if (cmd == BIO_CTRL_FLUSH) {

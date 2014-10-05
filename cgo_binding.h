@@ -14,7 +14,7 @@ typedef struct {
 } SSLConn;
 
 typedef struct {
-  long options;
+  unsigned long options;
   int verify_mode;
   EVP_PKEY *private_key;
   X509 *cert;
@@ -29,6 +29,14 @@ typedef struct {
   long code;
   char string[256];
 } SSLConnError;
+
+typedef struct _SSLCipher {
+	const char * name;
+	char * description;
+	int bits;
+	int alg_bits;
+	struct _SSLCipher * prev;
+} SSLCipher;
 
 extern const int SSLConn_EIO;
 extern const int SSLConn_EAGAIN;
@@ -47,6 +55,11 @@ extern int SSLConn_write(SSLConn *conn, const void *buf, int num,
 extern void SSLConn_free(SSLConn *conn);
 extern int SSLConn_do_handshake(SSLConn *conn, SSLConnError *err);
 extern int SSLConn_shutdown(SSLConn *conn, SSLConnError *err);
+
+extern SSLCipher * SSLConn_get_cipher(SSLConn *conn);
+
+extern SSLCipher * SSLConn_get_ciphers(SSLConn *conn);
+extern void SSLConn_free_ciphers(SSLCipher *cipher);
 
 extern EVP_PKEY *SSLConn_EVP_PKEY_new(void *buf, int len, SSLConnError *err);
 extern X509 *SSLConn_X509_new(void *buf, int len, SSLConnError *err);

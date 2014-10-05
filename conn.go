@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"sync"
 	"unsafe"
+	"fmt"
 )
 
 var (
@@ -22,12 +23,21 @@ var (
 )
 
 type VerifyMode int
+type Options uint
 
 const (
 	VERIFY_NONE = iota
 	VERIFY_PEER
 	VERIFY_FAIL_IF_NO_PEER_CERT
 	VERIFY_CLIENT_ONCE
+)
+
+const (
+	OP_NO_SSLv2 = C.SSL_OP_NO_SSLv2
+	OP_NO_SSLv3 = C.SSL_OP_NO_SSLv3
+	OP_NO_TLSv1 = C.SSL_OP_NO_TLSv1
+	OP_NO_TLSv1_1 = C.SSL_OP_NO_TLSv1_1
+	OP_NO_TLSv1_2 = C.SSL_OP_NO_TLSv1_2
 )
 
 type Config struct {
@@ -37,6 +47,7 @@ type Config struct {
 	CipherList       string
 	SessionIdContext string
 	SessionCacheSize int
+	Options          Options
 }
 
 type Conn struct {
@@ -44,6 +55,22 @@ type Conn struct {
 	lock    *sync.Mutex
 	reader  *NonBlockingReader
 	writer  *NonBlockingWriter
+}
+
+type Cipher struct {
+	Name string
+	Description string
+	Bits int
+	AlgBits int
+}
+
+type Error struct {
+	Code int
+	String string
+}
+
+func (e Error) Error() string {
+	return fmt.Sprintf("%d: %v", e.Code, e.String)
 }
 
 const (
@@ -58,7 +85,21 @@ func init() {
 // Creates new SSL connection for the underlying reader and writer. 
 func NewConn(reader io.Reader, writer io.Writer,
 	config *Config, server bool) (*Conn, error) {
+
+	c, err := NewIOLessConn(config, server)
+	if err == nil {
+		c.reader = NewNonBlockingReader(reader, defaultBufferSize)
+		c.writer = NewNonBlockingWriter(writer, defaultBufferSize)
+	}
+
+	return c, err
+}
+
+// Creates new SSL connection for the underlying reader and writer.
+func NewIOLessConn(config *Config, server bool) (*Conn, error) {
+
 	c := &Conn{}
+	c.lock = &sync.Mutex{}
 
 	if server && (config.Cert == nil || config.PrivateKey == nil) {
 		panic("Cert and PrivateKey are required for server SSL connections")
@@ -76,11 +117,9 @@ func NewConn(reader io.Reader, writer io.Writer,
 		return nil, errors.New(C.GoString(&sslConnError.string[0]))
 	}
 
-	c.lock = &sync.Mutex{}
-	c.reader = NewNonBlockingReader(reader, defaultBufferSize)
-	c.writer = NewNonBlockingWriter(writer, defaultBufferSize)
 	return c, nil
 }
+
 
 // Initiates the SSL handshake, must be called once before read or write.
 func (c *Conn) Handshake() error {
@@ -126,12 +165,53 @@ func (c *Conn) Shutdown() error {
 func (c *Conn) Free() {
 	C.SSLConn_free(c.sslConn)
 	c.sslConn = nil
-	c.reader.Close()
-	c.writer.Close()
+	if c.reader != nil { c.reader.Close() }
+	if c.writer != nil { c.writer.Close() }
 }
+
+func (c *Conn) Cipher() Cipher {
+	cipher := C.SSLConn_get_cipher(c.sslConn)
+	defer C.SSLConn_free_ciphers(cipher);
+
+	return sslcipherToCipher(cipher)
+}
+
+func sslcipherToCipher(cipher * C.SSLCipher) Cipher {
+	if cipher == nil {
+		return nil
+	}
+
+	return Cipher {
+		C.GoString(cipher.name),
+		C.GoString(cipher.description),
+		int(cipher.bits),
+		int(cipher.alg_bits),
+	}
+}
+
+// Returns a list o	f ciphers available on this connection
+func (c *Conn) Ciphers() []Cipher {
+
+	var ciphers * C.SSLCipher = C.SSLConn_get_ciphers(c.sslConn)
+	defer C.SSLConn_free_ciphers(ciphers);
+
+	results := make([]Cipher, 0);
+	for ciphers != nil {
+		cipher := sslcipherToCipher(ciphers)
+		results = append(results, cipher)
+		ciphers = ciphers.prev;
+	}
+
+	return results;
+}
+
 
 // Helper for functions that use SSL_get_error
 func (c *Conn) retCodeHandler(fn func(*C.SSLConnError) C.int) (int, error) {
+	if c.lock == nil {
+		panic("IO has not been set up on this SSL connection")
+	}
+
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -152,7 +232,7 @@ func (c *Conn) retCodeHandler(fn func(*C.SSLConnError) C.int) (int, error) {
 		case C.SSLConn_SYSCALL:
 			return 0, ErrIO
 		default:
-			return 0, errors.New(C.GoString(&err.string[0]))
+			return 0, Error{int(code), C.GoString(&err.string[0])}
 		}
 	}
 	panic("Should have had an error")
@@ -160,8 +240,8 @@ func (c *Conn) retCodeHandler(fn func(*C.SSLConnError) C.int) (int, error) {
 
 func newSSLConnConfig(config *Config) *C.SSLConnConfig {
 	c := &C.SSLConnConfig{}
-	// TODO: make configurable
-	c.options = C.SSL_OP_NO_SSLv2 | C.SSL_OP_NO_SSLv3
+
+	c.options = C.ulong( config.Options )
 
 	if config.PrivateKey != nil {
 		c.private_key = config.PrivateKey.key
